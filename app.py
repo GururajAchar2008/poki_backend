@@ -40,7 +40,7 @@ def broadcast(room: str, payload: dict, exclude=None):
 def websocket(connection, room):
     with room_lock:
         if len(rooms[room]) >= 2:
-            send_json(connection, {"type": "error", "message": "This private room already has two connected devices."})
+            send_json(connection, {"type": "error", "error": "This private room already has two connected devices."})
             return
         rooms[room].add(connection)
 
@@ -49,11 +49,23 @@ def websocket(connection, room):
     try:
         raw_hello = connection.receive()
         if raw_hello:
-            hello = json.loads(raw_hello)
+            try:
+                hello = json.loads(raw_hello)
+            except json.JSONDecodeError:
+                send_json(connection, {"type": "error", "error": "Invalid connection handshake."})
+                with room_lock:
+                    rooms[room].discard(connection)
+                return
             if hello.get("type") == "hello":
                 participant["name"] = str(hello.get("name") or participant["name"])[:60]
                 participant["deviceId"] = str(hello.get("deviceId") or participant["deviceId"])[:100]
                 participant["pinHash"] = str(hello.get("pinHash") or "")[:128]
+
+        if participant["deviceId"] == "unknown" or not participant["pinHash"]:
+            send_json(connection, {"type": "error", "error": "A device ID and calculator PIN are required to join this room."})
+            with room_lock:
+                rooms[room].discard(connection)
+            return
 
         with room_lock:
             expected_pin = room_pin_hashes.get(room)
@@ -68,6 +80,7 @@ def websocket(connection, room):
 
         for existing in existing_participants:
             send_json(connection, {"type": "presence", "online": True, "name": existing["name"]})
+        send_json(connection, {"type": "connected", "online": True})
         broadcast(room, {"type": "presence", "online": True, "name": participant["name"]}, exclude=connection)
 
         while True:
