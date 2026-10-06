@@ -15,6 +15,8 @@ app = Flask(__name__)
 CORS(app)
 sock = Sock(app)
 rooms: dict[str, set] = defaultdict(set)
+participants: dict[object, dict] = {}
+room_pin_hashes: dict[str, str] = {}
 room_lock = Lock()
 
 
@@ -42,7 +44,8 @@ def websocket(connection, room):
             return
         rooms[room].add(connection)
 
-    participant = {"name": "Poki friend", "deviceId": "unknown"}
+    participant = {"name": "Poki friend", "deviceId": "unknown", "pinHash": ""}
+    registered = False
     try:
         raw_hello = connection.receive()
         if raw_hello:
@@ -50,6 +53,21 @@ def websocket(connection, room):
             if hello.get("type") == "hello":
                 participant["name"] = str(hello.get("name") or participant["name"])[:60]
                 participant["deviceId"] = str(hello.get("deviceId") or participant["deviceId"])[:100]
+                participant["pinHash"] = str(hello.get("pinHash") or "")[:128]
+
+        with room_lock:
+            expected_pin = room_pin_hashes.get(room)
+            if expected_pin and participant["pinHash"] != expected_pin:
+                send_json(connection, {"type": "error", "error": "This room uses a different unlock PIN."})
+                rooms[room].discard(connection)
+                return
+            room_pin_hashes.setdefault(room, participant["pinHash"])
+            existing_participants = [participants[peer] for peer in rooms[room] if peer is not connection and peer in participants]
+            participants[connection] = participant
+            registered = True
+
+        for existing in existing_participants:
+            send_json(connection, {"type": "presence", "online": True, "name": existing["name"]})
         broadcast(room, {"type": "presence", "online": True, "name": participant["name"]}, exclude=connection)
 
         while True:
@@ -69,9 +87,12 @@ def websocket(connection, room):
     finally:
         with room_lock:
             rooms[room].discard(connection)
+            participants.pop(connection, None)
             if not rooms[room]:
                 rooms.pop(room, None)
-        broadcast(room, {"type": "presence", "online": False, "name": participant["name"]})
+                room_pin_hashes.pop(room, None)
+        if registered:
+            broadcast(room, {"type": "presence", "online": False, "name": participant["name"]})
 
 
 @app.get("/health")
